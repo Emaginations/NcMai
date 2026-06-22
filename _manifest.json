@@ -1,0 +1,54 @@
+{
+  "manifest_version": 2,
+  "id": "com.emaginations.ncmai",
+  "version": "1.0.0",
+  "name": "麦麦解析",
+  "description": "解码 QQ 用户发送的 .ncm 文件，并返回原始音频。仅供技术学习，请于 24 小时内删除生成文件。",
+  "author": {
+    "name": "Emaginations",
+    "url": "https://github.com/Emaginations"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/Emaginations/NcMai",
+    "homepage": "https://github.com/Emaginations/NcMai",
+    "documentation": "https://github.com/Emaginations/NcMai",
+    "issues": "https://github.com/Emaginations/NcMai/issues"
+  },
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.11.11"
+  },
+  "sdk": {
+    "min_version": "1.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [
+    {
+      "type": "python_package",
+      "name": "aiohttp",
+      "version_spec": ">=3.8.0"
+    },
+    {
+      "type": "python_package",
+      "name": "pycryptodome",
+      "version_spec": ">=3.15.0"
+    }
+  ],
+  "plugin_type": "media",
+  "display": {
+    "icon": {
+      "type": "emoji",
+      "value": "🎵",
+      "fallback": "music"
+    }
+  },
+  "capabilities": [
+    "send.text",
+    "send.file"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": ["zh-CN"]
+  }
+}
