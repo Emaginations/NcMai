@@ -2,11 +2,12 @@
 麦麦解析 (NCMai) - 解码用户发送的 .ncm 文件并返回原始音频。
 
 ⚠️ 免责声明：本插件仅供技术学习交流，请于 24 小时内删除解码生成的文件。
-感谢群友 termux 提供的源代码。
+感谢 termux 提供的源代码。
 
 2026-06-22 Try1: 初始版本，将 C 解码核心迁移为纯 Python 实现。
 2026-06-22 Try2: 移除直接 OneBot HTTP 调用，改用 MaiBot SDK 发送文件（通过 SnowLuma 网关）。
 2026-06-24 Try3: 完善文件发送流程（先上传获取 file_id 再发送），支持 SnowLuma / NapCat 双适配器。
+2026-06-24 Try4: 新增 /ncm 命令（单文件测试解码），新增 test 配置节，完善免责声明。
 """
 import asyncio
 import os
@@ -15,8 +16,10 @@ import tempfile
 import time
 from typing import Any, Dict, List, Optional
 
+
 from Crypto.Cipher import AES
 from maibot_sdk import (
+    Command,
     Field,
     HookHandler,
     MaiBotPlugin,
@@ -64,6 +67,16 @@ class PluginSection(PluginConfigBase):
         "order": 1,
     })
 
+class GatewayConfig(PluginConfigBase):
+    __ui_label__ = "网关设置"
+    __ui_order__ = 1
+    adapter: str = Field(default="snowluma", description="文件发送适配器: snowluma 或 napcat", json_schema_extra={
+        "label": "适配器",
+        "hint": "选择用于文件上传的适配器，默认为 snowluma",
+        "i18n": _schema_i18n(label_en="Adapter", label_ja="アダプター"),
+        "order": 0,
+    })
+
 class DecodeConfig(PluginConfigBase):
     __ui_label__ = "解码设置"
     __ui_order__ = 2
@@ -74,9 +87,27 @@ class DecodeConfig(PluginConfigBase):
         "order": 0,
     })
 
+class TestConfig(PluginConfigBase):
+    __ui_label__ = "测试设置"
+    __ui_order__ = 3
+    test_file: str = Field(default="伊格赛听 - 逍遥仙.ncm", description="测试文件名（位于插件目录下的 test 文件夹内）", json_schema_extra={
+        "label": "测试文件",
+        "hint": "仅用于 /ncm 命令测试，不会批量转换其他文件",
+        "placeholder": "伊格赛听 - 逍遥仙.ncm",
+        "i18n": _schema_i18n(label_en="Test File", label_ja="テストファイル"),
+        "order": 0,
+    })
+    test_output_dir: str = Field(default="test_output", description="测试输出文件夹路径（相对于插件目录）", json_schema_extra={
+        "label": "测试输出文件夹",
+        "hint": "/ncm 命令解码后的文件存放位置",
+        "placeholder": "test_output",
+        "i18n": _schema_i18n(label_en="Test Output Directory", label_ja="テスト出力フォルダ"),
+        "order": 1,
+    })
+
 class CleanupConfig(PluginConfigBase):
     __ui_label__ = "缓存清理"
-    __ui_order__ = 3
+    __ui_order__ = 4
     cache_ttl_seconds: int = Field(default=86400, ge=60, description="解码文件的生命周期（秒）", json_schema_extra={
         "label": "缓存有效期（秒）",
         "hint": "默认 86400 秒（24小时）",
@@ -89,21 +120,12 @@ class CleanupConfig(PluginConfigBase):
         "order": 1,
     })
 
-class GatewayConfig(PluginConfigBase):
-    __ui_label__ = "网关设置"
-    __ui_order__ = 1
-    adapter: str = Field(default="snowluma", description="文件发送适配器: snowluma 或 napcat", json_schema_extra={
-        "label": "适配器",
-        "hint": "选择用于文件上传的适配器，默认为 snowluma",
-        "i18n": _schema_i18n(label_en="Adapter", label_ja="アダプター"),
-        "order": 0,
-    })
-
 class NCMaiConfig(PluginConfigBase):
     plugin: PluginSection = Field(default_factory=PluginSection)
-    decode: DecodeConfig = Field(default_factory=DecodeConfig)
-    cleanup: CleanupConfig = Field(default_factory=CleanupConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    decode: DecodeConfig = Field(default_factory=DecodeConfig)
+    test: TestConfig = Field(default_factory=TestConfig)
+    cleanup: CleanupConfig = Field(default_factory=CleanupConfig)
 
 # ============================================================================
 # NCM 解码器
@@ -192,7 +214,6 @@ class FileSender:
         return self.plugin.config.gateway.adapter.lower()
 
     async def upload_group_file(self, group_id: int, file_path: str, name: str) -> Optional[str]:
-        """上传群文件，返回 file_id"""
         abs_path = os.path.abspath(file_path).replace(os.sep, '/')
         try:
             result = await self.plugin.ctx.send.upload_group_file(
@@ -212,7 +233,6 @@ class FileSender:
             return None
 
     async def upload_private_file(self, user_id: int, file_path: str, name: str) -> Optional[str]:
-        """上传私聊文件，返回 file_id"""
         abs_path = os.path.abspath(file_path).replace(os.sep, '/')
         try:
             result = await self.plugin.ctx.send.upload_private_file(
@@ -232,7 +252,6 @@ class FileSender:
             return None
 
     async def _custom_upload(self, action: str, file_path: str, name: str, **kwargs) -> Optional[str]:
-        """通过 send.custom 直接调用 OneBot API"""
         abs_path = os.path.abspath(file_path).replace(os.sep, '/')
         payload = {
             "action": action,
@@ -244,7 +263,7 @@ class FileSender:
         }
         try:
             result = await self.plugin.ctx.send.custom(
-                stream_id="",  # 上传不需要 stream_id
+                stream_id="",
                 message_chain=payload,
             )
             self.plugin.ctx.logger.info(f"[麦麦解析] _custom_upload({action}) 结果: {result}")
@@ -256,7 +275,6 @@ class FileSender:
             return None
 
     async def send_group_file(self, stream_id: str, group_id: int, file_id: str) -> bool:
-        """发送群文件消息"""
         message_chain = [
             {
                 "type": "file",
@@ -274,7 +292,6 @@ class FileSender:
             return False
 
     async def send_private_file(self, stream_id: str, user_id: int, file_id: str) -> bool:
-        """发送私聊文件消息"""
         message_chain = [
             {
                 "type": "file",
@@ -304,6 +321,7 @@ class NCMaiPlugin(MaiBotPlugin):
         self.ctx.logger.info(f"[麦麦解析] 缓存目录: {self._cache_dir}")
         self.ctx.logger.info(f"[麦麦解析] 文件发送适配器: {self._file_sender.adapter}")
         self._last_cleanup = time.time()
+        self._ensure_test_output_dir()
 
     async def on_unload(self) -> None:
         if self._http_session and not self._http_session.closed:
@@ -321,8 +339,26 @@ class NCMaiPlugin(MaiBotPlugin):
             self.ctx.logger.info("[麦麦解析] 配置已更新: version=%s", version)
             self._file_sender = FileSender(self)
             self.ctx.logger.info(f"[麦麦解析] 文件发送适配器已更新: {self._file_sender.adapter}")
+            self._ensure_test_output_dir()
 
     config_model = NCMaiConfig
+
+    # ===== 辅助方法 =====
+
+    def _get_plugin_dir(self) -> str:
+        return os.path.dirname(os.path.abspath(__file__))
+
+    def _get_test_file_path(self) -> str:
+        return os.path.join(self._get_plugin_dir(), "test", self.config.test.test_file)
+
+    def _get_test_output_dir(self) -> str:
+        return os.path.join(self._get_plugin_dir(), self.config.test.test_output_dir)
+
+    def _ensure_test_output_dir(self):
+        try:
+            os.makedirs(self._get_test_output_dir(), exist_ok=True)
+        except Exception:
+            pass
 
     async def _clean_old_cache(self):
         ttl = self.config.cleanup.cache_ttl_seconds
@@ -366,6 +402,14 @@ class NCMaiPlugin(MaiBotPlugin):
         else:
             self.ctx.logger.info(f"[麦麦解析] 无法发送消息(stream_id 为空): {text}")
 
+    async def _do_decode(self, ncm_data: bytes, source_name: str) -> Optional[bytes]:
+        audio_data = self._decoder.decode(ncm_data)
+        if audio_data:
+            self.ctx.logger.info(f"[麦麦解析] 解码成功: {source_name}")
+        else:
+            self.ctx.logger.warning(f"[麦麦解析] 解码失败: {source_name}")
+        return audio_data
+
     async def _send_decoded_file(
         self,
         stream_id: str,
@@ -374,13 +418,7 @@ class NCMaiPlugin(MaiBotPlugin):
         user_id: int,
         group_id: Optional[int] = None,
     ) -> bool:
-        """
-        发送解码后的文件。
-        流程：先上传获取 file_id，再通过 send.custom 发送文件消息。
-        根据 adapter 配置选择 SnowLuma 或 NapCat 的上传方式。
-        """
         if group_id:
-            # 群聊
             file_id = await self._file_sender.upload_group_file(group_id, file_path, file_name)
             if not file_id:
                 self.ctx.logger.error("[麦麦解析] 群文件上传失败，未获取到 file_id")
@@ -388,7 +426,6 @@ class NCMaiPlugin(MaiBotPlugin):
             self.ctx.logger.info(f"[麦麦解析] 群文件上传成功: file_id={file_id}")
             return await self._file_sender.send_group_file(stream_id, group_id, file_id)
         else:
-            # 私聊
             file_id = await self._file_sender.upload_private_file(user_id, file_path, file_name)
             if not file_id:
                 self.ctx.logger.error("[麦麦解析] 私聊文件上传失败，未获取到 file_id")
@@ -396,6 +433,7 @@ class NCMaiPlugin(MaiBotPlugin):
             self.ctx.logger.info(f"[麦麦解析] 私聊文件上传成功: file_id={file_id}")
             return await self._file_sender.send_private_file(stream_id, user_id, file_id)
 
+    # ===== Hook：拦截文件消息 =====
     @HookHandler(
         "chat.receive.after_process",
         name="ncmai_file_handler",
@@ -468,7 +506,7 @@ class NCMaiPlugin(MaiBotPlugin):
             await self._send_text(stream_id, "❌ 文件下载出错")
             return {"action": "abort"}
 
-        audio_data = self._decoder.decode(ncm_data)
+        audio_data = await self._do_decode(ncm_data, file_name)
         if not audio_data:
             await self._send_text(stream_id, "❌ 解码失败，文件可能已损坏或不是标准 .ncm 格式")
             return {"action": "abort"}
@@ -479,7 +517,7 @@ class NCMaiPlugin(MaiBotPlugin):
         out_path = os.path.join(self._cache_dir, out_name)
         with open(out_path, "wb") as f:
             f.write(audio_data)
-        self.ctx.logger.info(f"[麦麦解析] 解码成功，文件: {out_name}")
+        self.ctx.logger.info(f"[麦麦解析] 解码成功，文件已保存: {out_name}")
 
         send_ok = await self._send_decoded_file(
             stream_id=stream_id,
@@ -496,8 +534,52 @@ class NCMaiPlugin(MaiBotPlugin):
 
         return None
 
+    # ===== 命令处理器 =====
+    @Command("ncm", description="解码测试文件夹内的指定 .ncm 文件并输出到测试输出文件夹", pattern=r"^/ncm$")
+    async def handle_ncm_test(self, stream_id: str = "", **kwargs):
+        """解码测试文件夹内的单个 .ncm 文件"""
+        test_file_path = self._get_test_file_path()
+        output_dir = self._get_test_output_dir()
+        test_file_name = self.config.test.test_file
+
+        if not os.path.isfile(test_file_path):
+            self.ctx.logger.warning(f"[麦麦解析] 测试文件不存在: {test_file_path}")
+            await self._send_text(stream_id, f"❌ 测试文件不存在: test/{test_file_name}")
+            return True, "测试文件不存在", 0
+
+        try:
+            with open(test_file_path, "rb") as f:
+                ncm_data = f.read()
+        except Exception as e:
+            self.ctx.logger.error(f"[麦麦解析] 读取测试文件失败: {test_file_name}, {e}")
+            await self._send_text(stream_id, f"❌ 读取测试文件失败: {test_file_name}")
+            return True, "读取失败", 0
+
+        audio_data = await self._do_decode(ncm_data, test_file_name)
+        if not audio_data:
+            await self._send_text(stream_id, f"❌ 解码失败: {test_file_name}")
+            return True, "解码失败", 0
+
+        ext = self._detect_extension(audio_data)
+        safe_name = os.path.splitext(test_file_name)[0]
+        out_name = f"{safe_name}.{ext}"
+        os.makedirs(output_dir, exist_ok=True)
+        out_path = os.path.join(output_dir, out_name)
+
+        try:
+            with open(out_path, "wb") as f:
+                f.write(audio_data)
+            self.ctx.logger.info(f"[麦麦解析] /ncm 测试解码完成: {test_file_name} → {out_name}")
+            await self._send_text(stream_id, f"✅ 解码成功: {test_file_name} → {out_name}\n📁 输出文件夹: {self.config.test.test_output_dir}")
+        except Exception as e:
+            self.ctx.logger.error(f"[麦麦解析] 写入测试输出文件失败: {out_name}, {e}")
+            await self._send_text(stream_id, f"❌ 写入失败: {out_name}")
+            return True, "写入失败", 0
+
+        return True, f"解码成功: {out_name}", 1
+
 
 def create_plugin():
     return NCMaiPlugin()
 
-#try3
+# try4

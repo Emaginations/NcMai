@@ -3,6 +3,10 @@
 enabled = true
 config_version = "1.0.0"
 
+[gateway]
+# 文件发送适配器: "snowluma" 或 "napcat"
+adapter = "snowluma"
+
 [decode]
 # 解码时发送的随机提示语（21条以内，支持 emoji）
 progress_messages = [
@@ -28,12 +32,14 @@ progress_messages = [
     "🎁 准备发送无损文件…"
 ]
 
+[test]
+# 测试文件名（位于插件目录下的 test 文件夹内）
+test_file = "伊格赛听 - 逍遥仙.ncm"
+# 测试输出文件夹路径（相对于插件目录）
+test_output_dir = "test_output"
+
 [cleanup]
 # 解码缓存文件的生命周期（秒），默认 86400 = 24 小时
 cache_ttl_seconds = 86400
 # 每次收到新文件时是否主动清理过期缓存
 clean_on_request = true
-
-[gateway]
-# 文件发送方式: "snowluma" 或 "napcat"
-adapter = "snowluma"
