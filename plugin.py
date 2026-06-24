@@ -6,6 +6,7 @@
 
 2026-06-22 Try1: 初始版本，将 C 解码核心迁移为纯 Python 实现。
 2026-06-22 Try2: 移除直接 OneBot HTTP 调用，改用 MaiBot SDK 发送文件（通过 SnowLuma 网关）。
+2026-06-24 Try3: 完善文件发送流程（先上传获取 file_id 再发送），支持 SnowLuma / NapCat 双适配器。
 """
 import asyncio
 import os
@@ -88,10 +89,21 @@ class CleanupConfig(PluginConfigBase):
         "order": 1,
     })
 
+class GatewayConfig(PluginConfigBase):
+    __ui_label__ = "网关设置"
+    __ui_order__ = 1
+    adapter: str = Field(default="snowluma", description="文件发送适配器: snowluma 或 napcat", json_schema_extra={
+        "label": "适配器",
+        "hint": "选择用于文件上传的适配器，默认为 snowluma",
+        "i18n": _schema_i18n(label_en="Adapter", label_ja="アダプター"),
+        "order": 0,
+    })
+
 class NCMaiConfig(PluginConfigBase):
     plugin: PluginSection = Field(default_factory=PluginSection)
     decode: DecodeConfig = Field(default_factory=DecodeConfig)
     cleanup: CleanupConfig = Field(default_factory=CleanupConfig)
+    gateway: GatewayConfig = Field(default_factory=GatewayConfig)
 
 # ============================================================================
 # NCM 解码器
@@ -167,15 +179,130 @@ class NCMDecoder:
         return bytes(audio)
 
 # ============================================================================
+# 文件发送适配器
+# ============================================================================
+class FileSender:
+    """统一文件发送接口，支持 SnowLuma 和 NapCat 两种适配器"""
+
+    def __init__(self, plugin: 'NCMaiPlugin'):
+        self.plugin = plugin
+
+    @property
+    def adapter(self) -> str:
+        return self.plugin.config.gateway.adapter.lower()
+
+    async def upload_group_file(self, group_id: int, file_path: str, name: str) -> Optional[str]:
+        """上传群文件，返回 file_id"""
+        abs_path = os.path.abspath(file_path).replace(os.sep, '/')
+        try:
+            result = await self.plugin.ctx.send.upload_group_file(
+                group_id=group_id,
+                file=f"file:///{abs_path}",
+                name=name,
+            )
+            self.plugin.ctx.logger.info(f"[麦麦解析] upload_group_file 结果: {result}")
+            if isinstance(result, dict):
+                return result.get("file_id") or result.get("data", {}).get("file_id")
+            return None
+        except AttributeError:
+            self.plugin.ctx.logger.warning("[麦麦解析] ctx.send.upload_group_file 不可用，尝试 custom 上传")
+            return await self._custom_upload("upload_group_file", group_id=group_id, file_path=abs_path, name=name)
+        except Exception as e:
+            self.plugin.ctx.logger.error(f"[麦麦解析] 上传群文件失败: {e}")
+            return None
+
+    async def upload_private_file(self, user_id: int, file_path: str, name: str) -> Optional[str]:
+        """上传私聊文件，返回 file_id"""
+        abs_path = os.path.abspath(file_path).replace(os.sep, '/')
+        try:
+            result = await self.plugin.ctx.send.upload_private_file(
+                user_id=user_id,
+                file=f"file:///{abs_path}",
+                name=name,
+            )
+            self.plugin.ctx.logger.info(f"[麦麦解析] upload_private_file 结果: {result}")
+            if isinstance(result, dict):
+                return result.get("file_id") or result.get("data", {}).get("file_id")
+            return None
+        except AttributeError:
+            self.plugin.ctx.logger.warning("[麦麦解析] ctx.send.upload_private_file 不可用，尝试 custom 上传")
+            return await self._custom_upload("upload_private_file", user_id=user_id, file_path=abs_path, name=name)
+        except Exception as e:
+            self.plugin.ctx.logger.error(f"[麦麦解析] 上传私聊文件失败: {e}")
+            return None
+
+    async def _custom_upload(self, action: str, file_path: str, name: str, **kwargs) -> Optional[str]:
+        """通过 send.custom 直接调用 OneBot API"""
+        abs_path = os.path.abspath(file_path).replace(os.sep, '/')
+        payload = {
+            "action": action,
+            "params": {
+                "file": f"file:///{abs_path}",
+                "name": name,
+                **kwargs,
+            }
+        }
+        try:
+            result = await self.plugin.ctx.send.custom(
+                stream_id="",  # 上传不需要 stream_id
+                message_chain=payload,
+            )
+            self.plugin.ctx.logger.info(f"[麦麦解析] _custom_upload({action}) 结果: {result}")
+            if isinstance(result, dict):
+                return result.get("file_id") or result.get("data", {}).get("file_id")
+            return None
+        except Exception as e:
+            self.plugin.ctx.logger.error(f"[麦麦解析] _custom_upload({action}) 失败: {e}")
+            return None
+
+    async def send_group_file(self, stream_id: str, group_id: int, file_id: str) -> bool:
+        """发送群文件消息"""
+        message_chain = [
+            {
+                "type": "file",
+                "data": {
+                    "file_id": file_id,
+                },
+            }
+        ]
+        try:
+            result = await self.plugin.ctx.send.custom(stream_id, message_chain)
+            self.plugin.ctx.logger.info(f"[麦麦解析] 群文件发送结果: {result}")
+            return True
+        except Exception as e:
+            self.plugin.ctx.logger.error(f"[麦麦解析] 群文件发送失败: {e}")
+            return False
+
+    async def send_private_file(self, stream_id: str, user_id: int, file_id: str) -> bool:
+        """发送私聊文件消息"""
+        message_chain = [
+            {
+                "type": "file",
+                "data": {
+                    "file_id": file_id,
+                },
+            }
+        ]
+        try:
+            result = await self.plugin.ctx.send.custom(stream_id, message_chain)
+            self.plugin.ctx.logger.info(f"[麦麦解析] 私聊文件发送结果: {result}")
+            return True
+        except Exception as e:
+            self.plugin.ctx.logger.error(f"[麦麦解析] 私聊文件发送失败: {e}")
+            return False
+
+# ============================================================================
 # 插件主体
 # ============================================================================
 class NCMaiPlugin(MaiBotPlugin):
     async def on_load(self) -> None:
         self.ctx.logger.info("[麦麦解析] 插件已加载，注意：解码文件请于24小时内删除，仅供学习交流。")
         self._decoder = NCMDecoder()
+        self._file_sender = FileSender(self)
         self._http_session: Optional[aiohttp.ClientSession] = None
         self._cache_dir = tempfile.mkdtemp(prefix="ncmai_cache_")
         self.ctx.logger.info(f"[麦麦解析] 缓存目录: {self._cache_dir}")
+        self.ctx.logger.info(f"[麦麦解析] 文件发送适配器: {self._file_sender.adapter}")
         self._last_cleanup = time.time()
 
     async def on_unload(self) -> None:
@@ -192,6 +319,8 @@ class NCMaiPlugin(MaiBotPlugin):
     async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
         if scope == "self":
             self.ctx.logger.info("[麦麦解析] 配置已更新: version=%s", version)
+            self._file_sender = FileSender(self)
+            self.ctx.logger.info(f"[麦麦解析] 文件发送适配器已更新: {self._file_sender.adapter}")
 
     config_model = NCMaiConfig
 
@@ -237,25 +366,35 @@ class NCMaiPlugin(MaiBotPlugin):
         else:
             self.ctx.logger.info(f"[麦麦解析] 无法发送消息(stream_id 为空): {text}")
 
-    async def _send_file(self, stream_id: str, file_path: str, file_name: str):
-        abs_path = os.path.abspath(file_path).replace(os.sep, '/')
-        file_uri = f"file:///{abs_path}"
-        message_chain = [
-            {
-                "type": "file",
-                "data": {
-                    "file": file_uri,
-                    "name": file_name,
-                },
-            }
-        ]
-        try:
-            result = await self.ctx.send.custom(stream_id, message_chain)
-            self.ctx.logger.info(f"[麦麦解析] 文件发送结果: {result}")
-            return True
-        except Exception as e:
-            self.ctx.logger.error(f"[麦麦解析] 发送文件失败: {e}")
-            return False
+    async def _send_decoded_file(
+        self,
+        stream_id: str,
+        file_path: str,
+        file_name: str,
+        user_id: int,
+        group_id: Optional[int] = None,
+    ) -> bool:
+        """
+        发送解码后的文件。
+        流程：先上传获取 file_id，再通过 send.custom 发送文件消息。
+        根据 adapter 配置选择 SnowLuma 或 NapCat 的上传方式。
+        """
+        if group_id:
+            # 群聊
+            file_id = await self._file_sender.upload_group_file(group_id, file_path, file_name)
+            if not file_id:
+                self.ctx.logger.error("[麦麦解析] 群文件上传失败，未获取到 file_id")
+                return False
+            self.ctx.logger.info(f"[麦麦解析] 群文件上传成功: file_id={file_id}")
+            return await self._file_sender.send_group_file(stream_id, group_id, file_id)
+        else:
+            # 私聊
+            file_id = await self._file_sender.upload_private_file(user_id, file_path, file_name)
+            if not file_id:
+                self.ctx.logger.error("[麦麦解析] 私聊文件上传失败，未获取到 file_id")
+                return False
+            self.ctx.logger.info(f"[麦麦解析] 私聊文件上传成功: file_id={file_id}")
+            return await self._file_sender.send_private_file(stream_id, user_id, file_id)
 
     @HookHandler(
         "chat.receive.after_process",
@@ -342,7 +481,13 @@ class NCMaiPlugin(MaiBotPlugin):
             f.write(audio_data)
         self.ctx.logger.info(f"[麦麦解析] 解码成功，文件: {out_name}")
 
-        send_ok = await self._send_file(stream_id, out_path, out_name)
+        send_ok = await self._send_decoded_file(
+            stream_id=stream_id,
+            file_path=out_path,
+            file_name=out_name,
+            user_id=int(user_id),
+            group_id=int(group_id) if group_id else None,
+        )
         if not send_ok:
             await self._send_text(stream_id, "❌ 文件发送失败，请稍后重试")
 
@@ -355,4 +500,4 @@ class NCMaiPlugin(MaiBotPlugin):
 def create_plugin():
     return NCMaiPlugin()
 
-#try2
+#try3

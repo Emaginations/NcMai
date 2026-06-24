@@ -10,10 +10,10 @@
   },
   "license": "MIT",
   "urls": {
-    "repository": "https://github.com/Emaginations/NcMai",
-    "homepage": "https://github.com/Emaginations/NcMai",
-    "documentation": "https://github.com/Emaginations/NcMai",
-    "issues": "https://github.com/Emaginations/NcMai/issues"
+    "repository": "https://github.com/Emaginations/NCMai",
+    "homepage": "https://github.com/Emaginations/NCMai",
+    "documentation": "https://github.com/Emaginations/NCMai",
+    "issues": "https://github.com/Emaginations/NCMai/issues"
   },
   "host_application": {
     "min_version": "1.0.0",
@@ -45,7 +45,7 @@
   },
   "capabilities": [
     "send.text",
-    "send.file"
+    "send.custom"
   ],
   "i18n": {
     "default_locale": "zh-CN",

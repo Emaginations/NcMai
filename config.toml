@@ -33,3 +33,7 @@ progress_messages = [
 cache_ttl_seconds = 86400
 # 每次收到新文件时是否主动清理过期缓存
 clean_on_request = true
+
+[gateway]
+# 文件发送方式: "snowluma" 或 "napcat"
+adapter = "snowluma"
