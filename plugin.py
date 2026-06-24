@@ -7,7 +7,7 @@
 2026-06-22 Try1: 初始版本，将 C 解码核心迁移为纯 Python 实现。
 2026-06-22 Try2: 移除直接 OneBot HTTP 调用，改用 MaiBot SDK 发送文件（通过 SnowLuma 网关）。
 2026-06-24 Try3: 完善文件发送流程（先上传获取 file_id 再发送），支持 SnowLuma / NapCat 双适配器。
-2026-06-24 Try4: 新增 /ncm 命令（单文件测试解码），新增 test 配置节，完善免责声明。
+2026-06-24 Try4: 新增 /ncm 命令（单文件测试解码），新增 test 配置节，完善免责声明。提示语日常化。
 """
 import asyncio
 import os
@@ -16,8 +16,6 @@ import tempfile
 import time
 from typing import Any, Dict, List, Optional
 
-
-from Crypto.Cipher import AES
 from maibot_sdk import (
     Command,
     Field,
@@ -28,6 +26,10 @@ from maibot_sdk import (
 from maibot_sdk.types import HookMode, HookOrder
 
 import aiohttp
+
+# AES 解密库导入（兼容多种安装方式）
+from Crypto.Cipher import AES
+
 
 # ============================================================================
 # 多语言化（基础）
@@ -90,19 +92,26 @@ class DecodeConfig(PluginConfigBase):
 class TestConfig(PluginConfigBase):
     __ui_label__ = "测试设置"
     __ui_order__ = 3
-    test_file: str = Field(default="伊格赛听 - 逍遥仙.ncm", description="测试文件名（位于插件目录下的 test 文件夹内）", json_schema_extra={
+    test_dir: str = Field(default="test_ncm_song", description="测试文件夹名（位于插件目录下）", json_schema_extra={
+        "label": "测试文件夹",
+        "hint": "存放用于 /ncm 命令测试的 .ncm 文件",
+        "placeholder": "test_ncm_song",
+        "i18n": _schema_i18n(label_en="Test Directory", label_ja="テストフォルダ"),
+        "order": 0,
+    })
+    test_file: str = Field(default="伊格赛听 - 逍遥仙.ncm", description="测试文件名（位于测试文件夹内）", json_schema_extra={
         "label": "测试文件",
         "hint": "仅用于 /ncm 命令测试，不会批量转换其他文件",
         "placeholder": "伊格赛听 - 逍遥仙.ncm",
         "i18n": _schema_i18n(label_en="Test File", label_ja="テストファイル"),
-        "order": 0,
+        "order": 1,
     })
     test_output_dir: str = Field(default="test_output", description="测试输出文件夹路径（相对于插件目录）", json_schema_extra={
         "label": "测试输出文件夹",
         "hint": "/ncm 命令解码后的文件存放位置",
         "placeholder": "test_output",
         "i18n": _schema_i18n(label_en="Test Output Directory", label_ja="テスト出力フォルダ"),
-        "order": 1,
+        "order": 2,
     })
 
 class CleanupConfig(PluginConfigBase):
@@ -142,6 +151,11 @@ class NCMDecoder:
 
     @staticmethod
     def aes_ecb_decrypt(data: bytes, key: bytes) -> bytes:
+        if AES is None:
+            raise RuntimeError(
+                "未找到可用的 AES 解密库。请安装 pycryptodome：\n"
+                "  pip install pycryptodome"
+            )
         cipher = AES.new(key, AES.MODE_ECB)
         plain = cipher.decrypt(data)
         pad = plain[-1]
@@ -349,7 +363,7 @@ class NCMaiPlugin(MaiBotPlugin):
         return os.path.dirname(os.path.abspath(__file__))
 
     def _get_test_file_path(self) -> str:
-        return os.path.join(self._get_plugin_dir(), "test", self.config.test.test_file)
+        return os.path.join(self._get_plugin_dir(), self.config.test.test_dir, self.config.test.test_file)
 
     def _get_test_output_dir(self) -> str:
         return os.path.join(self._get_plugin_dir(), self.config.test.test_output_dir)
@@ -379,7 +393,7 @@ class NCMaiPlugin(MaiBotPlugin):
     def _random_progress_msg(self) -> str:
         msgs = self.config.decode.progress_messages
         if not msgs:
-            return "🎵 正在解码..."
+            return "🎵 解码中…"
         return random.choice(msgs)
 
     def _detect_extension(self, data: bytes) -> str:
@@ -541,10 +555,11 @@ class NCMaiPlugin(MaiBotPlugin):
         test_file_path = self._get_test_file_path()
         output_dir = self._get_test_output_dir()
         test_file_name = self.config.test.test_file
+        test_dir = self.config.test.test_dir
 
         if not os.path.isfile(test_file_path):
             self.ctx.logger.warning(f"[麦麦解析] 测试文件不存在: {test_file_path}")
-            await self._send_text(stream_id, f"❌ 测试文件不存在: test/{test_file_name}")
+            await self._send_text(stream_id, f"❌ 测试文件不存在: {test_dir}/{test_file_name}")
             return True, "测试文件不存在", 0
 
         try:
