@@ -4,44 +4,15 @@ enabled = true
 config_version = "1.0.0"
 
 [gateway]
-# 文件发送适配器: "snowluma" 或 "napcat"
+# 文件发送适配器，可选 "snowluma" 或 "napcat"
 adapter = "snowluma"
 
 [decode]
-# 解码时发送的随机提示语（21条以内，支持 emoji，长度 2-10 字）
-progress_messages = [
-    "🎵 来了来了",
-    "🔍 让我看看",
-    "🎶 稍等片刻",
-    "📀 在读文件…",
-    "✨ 马上就好",
-    "🎧 别急~",
-    "🔐 钥匙转转",
-    "📡 收到！",
-    "🎼 音乐解锁中",
-    "💿 转啊转…",
-    "🎤 咳，快了",
-    "🔊 解码ing",
-    "🎹 等一下哈",
-    "📻 调频中…",
-    "🎚️ 好听的来了",
-    "🎛️ 快好了",
-    "💡 完成了！",
-    "🎵 喏，给你",
-    "🔓 好啦好啦",
-    "🎁 接好~"
-]
+# 提示语风格，可选 "daily"（日常）、"cute"（可爱）、"minimal"（极简）
+progress_style = "daily"
 
 [test]
-# 测试文件夹名（位于插件目录下）
-test_dir = "test_ncm_song"
-# 测试文件名（位于 test_dir 文件夹内）
-test_file = "伊格赛听 - 逍遥仙.ncm"
-# 测试输出文件夹路径（相对于插件目录）
-test_output_dir = "test_output"
-
-[cleanup]
-# 解码缓存文件的生命周期（秒），默认 86400 = 24 小时
-cache_ttl_seconds = 86400
-# 每次收到新文件时是否主动清理过期缓存
-clean_on_request = true
+# 是否启用 /ncm 测试命令
+enable_test_command = true
+# 测试账号 QQ 号（/ncm 命令仅对此用户生效，并将文件发送给此用户）
+test_user_id = ""
