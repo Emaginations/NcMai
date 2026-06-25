@@ -9,11 +9,11 @@
 2026-06-24 Try3: 完善文件发送流程（先上传获取 file_id 再发送），支持 SnowLuma / NapCat 双适配器。
 2026-06-24 Try4: 新增 /ncm 命令（单文件测试解码），新增 test 配置节，完善免责声明。提示语日常化。
 2026-06-25 Try5: 全面重构 WebUI 配置（下拉选择器），强化日志，测试命令可控，缓存自动清理。
+2026-06-26 Try6: 修复 WebUI 下拉菜单不显示内容的问题，使用 x-widget: select 配合 enum。
 """
 import asyncio
 import os
 import random
-import shutil
 import tempfile
 import time
 from typing import Any, Dict, List, Optional
@@ -76,12 +76,11 @@ class GatewayConfig(PluginConfigBase):
     __ui_order__ = 1
     adapter: str = Field(
         default="snowluma",
-        description="文件发送适配器",
+        description="文件发送适配器：SnowLuma 或 NapCat",
         json_schema_extra={
             "label": "适配器",
-            "hint": "选择 SnowLuma 或 NapCat",
-            "enum": ["snowluma", "napcat"],
             "x-widget": "select",
+            "enum": ["snowluma", "napcat"],
             "i18n": _schema_i18n(label_en="Adapter", label_ja="アダプター"),
             "order": 0,
         },
@@ -92,12 +91,11 @@ class DecodeConfig(PluginConfigBase):
     __ui_order__ = 2
     progress_style: str = Field(
         default="daily",
-        description="解码提示语风格",
+        description="解码提示语风格：日常、可爱或极简",
         json_schema_extra={
             "label": "提示语风格",
-            "hint": "日常、可爱或极简",
-            "enum": ["daily", "cute", "minimal"],
             "x-widget": "select",
+            "enum": ["daily", "cute", "minimal"],
             "i18n": _schema_i18n(label_en="Prompt Style", label_ja="プロンプトスタイル"),
             "order": 0,
         },
@@ -108,21 +106,19 @@ class TestConfig(PluginConfigBase):
     __ui_order__ = 3
     enable_test_command: bool = Field(
         default=True,
-        description="启用 /ncm 测试命令",
+        description="是否启用 /ncm 测试命令",
         json_schema_extra={
             "label": "启用 /ncm 命令",
-            "hint": "开启后可使用 /ncm 命令测试解码功能",
             "i18n": _schema_i18n(label_en="Enable /ncm", label_ja="/ncmを有効化"),
             "order": 0,
         },
     )
     test_user_id: str = Field(
         default="",
-        description="测试账号 QQ 号",
+        description="测试账号（QQ号），留空则不限制 /ncm 使用者",
         json_schema_extra={
             "label": "测试账号",
-            "hint": "/ncm 命令仅对此用户生效，并将文件发给此用户",
-            "placeholder": "留空则不限制",
+            "placeholder": "留空则所有人可用",
             "i18n": _schema_i18n(label_en="Test User ID", label_ja="テストユーザーID"),
             "order": 1,
         },
@@ -564,7 +560,7 @@ class NCMaiPlugin(MaiBotPlugin):
     # ===== 命令处理器 =====
     @Command("ncm", description="测试解码指定 .ncm 文件并发送给测试账号", pattern=r"^/ncm$")
     async def handle_ncm_test(self, stream_id: str = "", **kwargs):
-        """解码测试文件夹内的单个 .ncm 文件并发送给测试账号"""
+        """解码测试文件夹内的单个 .ncm 文件并发送给当前用户（需权限）"""
         config = self.config.test
         if not config.enable_test_command:
             await self._send_text(stream_id, "❌ /ncm 测试命令未启用")
@@ -611,12 +607,8 @@ class NCMaiPlugin(MaiBotPlugin):
         with open(out_path, "wb") as f:
             f.write(audio_data)
 
-        # 确定目标用户和流：直接发给触发命令的用户（私聊或群内）
-        # 注意：/ncm 命令通常在群聊或私聊中触发，我们直接使用当前的 stream_id 发送文件
-        # 如果需要发给特定的测试账号，可以通过私聊方式，但这里我们直接利用当前的 stream_id 发送到当前对话
-        # 根据需求，/ncm 将解码后的文件发送给测试账号，这里测试账号就是触发命令的用户（已通过 test_user_id 限制）
+        # 发送给当前用户（私聊或群聊），使用当前消息的 stream_id
         user_id = int(sender_id)
-        # 群聊则 group_id 来自消息
         group_id = None
         group_info = message.get("group_info", {}) or message.get("message_info", {}).get("group_info", {})
         if group_info:
@@ -634,11 +626,10 @@ class NCMaiPlugin(MaiBotPlugin):
         else:
             await self._send_text(stream_id, "❌ 文件发送失败")
 
-        # 缓存已在 _send_decoded_file 中自动清理，无需额外操作
         return True, f"解码完成: {out_name}", 1
 
 
 def create_plugin():
     return NCMaiPlugin()
 
-# try5
+# try6
