@@ -9,12 +9,11 @@
 2026-06-24 Try3: 完善文件发送流程（先上传获取 file_id 再发送），支持 SnowLuma / NapCat 双适配器。
 2026-06-24 Try4: 新增 /ncm 命令（单文件测试解码），新增 test 配置节，完善免责声明。提示语日常化。
 2026-06-25 Try5: 全面重构 WebUI 配置（下拉选择器），强化日志，测试命令可控，缓存自动清理。
-2026-06-26 Try6: 修复 WebUI 下拉菜单不显示内容的问题，使用 x-widget: select 配合 enum。
+2026-06-26 Try6: 网关改为滑动开关（SnowLuma/NapCat），提示语恢复为可编辑列表；增强用户 ID 提取兼容性；Docker 环境适配。
 """
 import asyncio
 import os
 import random
-import tempfile
 import time
 from typing import Any, Dict, List, Optional
 
@@ -31,7 +30,6 @@ import aiohttp
 
 # AES 解密库导入（兼容多种安装方式）
 from Crypto.Cipher import AES
-
 
 # ============================================================================
 # 多语言化（基础）
@@ -74,14 +72,19 @@ class PluginSection(PluginConfigBase):
 class GatewayConfig(PluginConfigBase):
     __ui_label__ = "网关设置"
     __ui_order__ = 1
-    adapter: str = Field(
-        default="snowluma",
-        description="文件发送适配器：SnowLuma 或 NapCat",
+    use_snowluma: bool = Field(
+        default=True,
+        description="是否使用 SnowLuma 适配器（关闭则使用 NapCat）",
         json_schema_extra={
             "label": "适配器",
-            "x-widget": "select",
-            "enum": ["snowluma", "napcat"],
-            "i18n": _schema_i18n(label_en="Adapter", label_ja="アダプター"),
+            "hint": "开启：SnowLuma | 关闭：NapCat",
+            "x-widget": "switch",
+            "i18n": _schema_i18n(
+                label_en="Use SnowLuma",
+                label_ja="SnowLuma を使用",
+                hint_en="Turn on for SnowLuma, off for NapCat",
+                hint_ja="オンでSnowLuma、オフでNapCat"
+            ),
             "order": 0,
         },
     )
@@ -89,14 +92,13 @@ class GatewayConfig(PluginConfigBase):
 class DecodeConfig(PluginConfigBase):
     __ui_label__ = "解码设置"
     __ui_order__ = 2
-    progress_style: str = Field(
-        default="daily",
-        description="解码提示语风格：日常、可爱或极简",
+    progress_messages: List[str] = Field(
+        default_factory=list,
+        description="解码时随机发送的提示语（支持 emoji，长度 2-10 字）",
         json_schema_extra={
-            "label": "提示语风格",
-            "x-widget": "select",
-            "enum": ["daily", "cute", "minimal"],
-            "i18n": _schema_i18n(label_en="Prompt Style", label_ja="プロンプトスタイル"),
+            "label": "随机提示语",
+            "hint": "每行一条，最多 21 条",
+            "i18n": _schema_i18n(label_en="Progress Messages", label_ja="進行状況メッセージ"),
             "order": 0,
         },
     )
@@ -219,80 +221,70 @@ class FileSender:
 
     @property
     def adapter(self) -> str:
-        return self.plugin.config.gateway.adapter.lower()
+        return "snowluma" if self.plugin.config.gateway.use_snowluma else "napcat"
 
     async def upload_group_file(self, group_id: int, file_path: str, name: str) -> Optional[str]:
         abs_path = os.path.abspath(file_path).replace(os.sep, '/')
-        self.plugin.ctx.logger.info(f"[麦麦解析] 开始上传群文件: {name} (group_id={group_id})")
+        self.plugin.ctx.logger.info(f"[麦麦解析] 开始上传群文件: {name} (group_id={group_id}, path={abs_path})")
         try:
-            result = await self.plugin.ctx.send.upload_group_file(
-                group_id=group_id,
-                file=f"file:///{abs_path}",
-                name=name,
+            result = await self.plugin.ctx.send.custom(
+                custom_type="upload_group_file",
+                stream_id="",
+                data={
+                    "group_id": group_id,
+                    "file": f"file:///{abs_path}",
+                    "name": name,
+                    "folder": "/",
+                },
             )
-            self.plugin.ctx.logger.info(f"[麦麦解析] upload_group_file 原始返回: {result}")
+            self.plugin.ctx.logger.info(f"[麦麦解析] upload_group_file 返回: {result}")
             if isinstance(result, dict):
                 file_id = result.get("file_id") or result.get("data", {}).get("file_id")
                 if file_id:
+                    self.plugin.ctx.logger.info(f"[麦麦解析] 群文件上传成功: file_id={file_id}")
                     return file_id
             return None
-        except AttributeError:
-            self.plugin.ctx.logger.warning("[麦麦解析] ctx.send.upload_group_file 不可用，尝试 custom 上传")
-            return await self._custom_upload("upload_group_file", group_id=group_id, file_path=abs_path, name=name)
         except Exception as e:
             self.plugin.ctx.logger.error(f"[麦麦解析] 上传群文件异常: {e}")
             return None
 
     async def upload_private_file(self, user_id: int, file_path: str, name: str) -> Optional[str]:
         abs_path = os.path.abspath(file_path).replace(os.sep, '/')
-        self.plugin.ctx.logger.info(f"[麦麦解析] 开始上传私聊文件: {name} (user_id={user_id})")
+        self.plugin.ctx.logger.info(f"[麦麦解析] 开始上传私聊文件: {name} (user_id={user_id}, path={abs_path})")
         try:
-            result = await self.plugin.ctx.send.upload_private_file(
-                user_id=user_id,
-                file=f"file:///{abs_path}",
-                name=name,
+            result = await self.plugin.ctx.send.custom(
+                custom_type="upload_private_file",
+                stream_id="",
+                data={
+                    "user_id": user_id,
+                    "file": f"file:///{abs_path}",
+                    "name": name,
+                },
             )
-            self.plugin.ctx.logger.info(f"[麦麦解析] upload_private_file 原始返回: {result}")
+            self.plugin.ctx.logger.info(f"[麦麦解析] upload_private_file 返回: {result}")
             if isinstance(result, dict):
                 file_id = result.get("file_id") or result.get("data", {}).get("file_id")
                 if file_id:
+                    self.plugin.ctx.logger.info(f"[麦麦解析] 私聊文件上传成功: file_id={file_id}")
                     return file_id
             return None
-        except AttributeError:
-            self.plugin.ctx.logger.warning("[麦麦解析] ctx.send.upload_private_file 不可用，尝试 custom 上传")
-            return await self._custom_upload("upload_private_file", user_id=user_id, file_path=abs_path, name=name)
         except Exception as e:
             self.plugin.ctx.logger.error(f"[麦麦解析] 上传私聊文件异常: {e}")
             return None
 
-    async def _custom_upload(self, action: str, file_path: str, name: str, **kwargs) -> Optional[str]:
-        abs_path = os.path.abspath(file_path).replace(os.sep, '/')
-        payload = {
-            "action": action,
-            "params": {
-                "file": f"file:///{abs_path}",
-                "name": name,
-                **kwargs,
-            }
-        }
+    async def send_group_file(self, stream_id: str, group_id: int, file_id: str) -> bool:
+        self.plugin.ctx.logger.info(f"[麦麦解析] 发送群文件消息: file_id={file_id}, group_id={group_id}")
         try:
             result = await self.plugin.ctx.send.custom(
-                stream_id="",
-                message_chain=payload,
+                custom_type="send_group_msg",
+                stream_id=stream_id,
+                data={
+                    "group_id": group_id,
+                    "message": [
+                        {"type": "file", "data": {"file_id": file_id}}
+                    ],
+                },
             )
-            self.plugin.ctx.logger.info(f"[麦麦解析] _custom_upload({action}) 结果: {result}")
-            if isinstance(result, dict):
-                return result.get("file_id") or result.get("data", {}).get("file_id")
-            return None
-        except Exception as e:
-            self.plugin.ctx.logger.error(f"[麦麦解析] _custom_upload({action}) 失败: {e}")
-            return None
-
-    async def send_group_file(self, stream_id: str, group_id: int, file_id: str) -> bool:
-        self.plugin.ctx.logger.info(f"[麦麦解析] 发送群文件消息: file_id={file_id}, stream_id={stream_id}")
-        message_chain = [{"type": "file", "data": {"file_id": file_id}}]
-        try:
-            result = await self.plugin.ctx.send.custom(stream_id, message_chain)
             self.plugin.ctx.logger.info(f"[麦麦解析] 群文件发送结果: {result}")
             return True
         except Exception as e:
@@ -300,10 +292,18 @@ class FileSender:
             return False
 
     async def send_private_file(self, stream_id: str, user_id: int, file_id: str) -> bool:
-        self.plugin.ctx.logger.info(f"[麦麦解析] 发送私聊文件消息: file_id={file_id}, stream_id={stream_id}")
-        message_chain = [{"type": "file", "data": {"file_id": file_id}}]
+        self.plugin.ctx.logger.info(f"[麦麦解析] 发送私聊文件消息: file_id={file_id}, user_id={user_id}")
         try:
-            result = await self.plugin.ctx.send.custom(stream_id, message_chain)
+            result = await self.plugin.ctx.send.custom(
+                custom_type="send_private_msg",
+                stream_id=stream_id,
+                data={
+                    "user_id": user_id,
+                    "message": [
+                        {"type": "file", "data": {"file_id": file_id}}
+                    ],
+                },
+            )
             self.plugin.ctx.logger.info(f"[麦麦解析] 私聊文件发送结果: {result}")
             return True
         except Exception as e:
@@ -314,32 +314,7 @@ class FileSender:
 # 插件主体
 # ============================================================================
 class NCMaiPlugin(MaiBotPlugin):
-    # 提示语风格映射
-    PROGRESS_STYLES = {
-        "daily": [
-            "🎵 来了来了", "🔍 让我看看", "🎶 稍等片刻", "📀 在读文件…",
-            "✨ 马上就好", "🎧 别急~", "🔐 钥匙转转", "📡 收到！",
-            "🎼 音乐解锁中", "💿 转啊转…", "🎤 咳，快了", "🔊 解码ing",
-            "🎹 等一下哈", "📻 调频中…", "🎚️ 好听的来了", "🎛️ 快好了",
-            "💡 完成了！", "🎵 喏，给你", "🔓 好啦好啦", "🎁 接好~"
-        ],
-        "cute": [
-            "🐣 啾啾，解码中", "🌸 稍等哦~", "🍭 甜蜜解锁", "🎀 魔法准备",
-            "🍬 糖果钥匙", "💖 心形密码", "🧸 抱抱，快好了", "🐱 喵，等等",
-            "🦄 梦幻音频", "🍩 甜甜圈解码", "🐾 小爪印验证", "🎪 马戏团开场",
-            "✨ 星星在转", "🌈 彩虹桥搭建", "🍀 四叶草幸运", "🐰 兔子耳朵竖起来",
-            "🎠 旋转木马", "🕊️ 白鸽飞过", "🌻 向日葵开", "🍒 樱桃已摘"
-        ],
-        "minimal": [
-            "🎵 解码中", "📀 读取", "🔐 解锁", "✨ 完成",
-            "🎧 解密", "🎶 解析", "🎤 加载", "🔊 处理",
-            "🎹 转换", "📻 接收", "🎚️ 输出", "🎛️ 就绪",
-            "💡 好了", "🎵 喏", "🔓 OK", "🎁 拿去",
-            "👌 搞定", "✔️ 成功", "✅ 完毕", "🎉 完成"
-        ]
-    }
-
-    # 测试文件路径（相对插件目录）
+    # 测试文件路径（相对插件目录，位于 test_ncm_song 文件夹内）
     TEST_NCM_FILE = os.path.join("test_ncm_song", "伊格赛听 - 逍遥仙.ncm")
 
     async def on_load(self) -> None:
@@ -347,10 +322,11 @@ class NCMaiPlugin(MaiBotPlugin):
         self._decoder = NCMDecoder()
         self._file_sender = FileSender(self)
         self._http_session: Optional[aiohttp.ClientSession] = None
-        self._cache_dir = tempfile.mkdtemp(prefix="ncmai_cache_")
+        # 使用插件目录下的 test_ncm_song 作为缓存和输出目录
+        self._cache_dir = os.path.join(self._get_plugin_dir(), "test_ncm_song")
+        os.makedirs(self._cache_dir, exist_ok=True)
         self.ctx.logger.info(f"[麦麦解析] 缓存目录: {self._cache_dir}")
         self.ctx.logger.info(f"[麦麦解析] 当前适配器: {self._file_sender.adapter}")
-        self.ctx.logger.info(f"[麦麦解析] 提示语风格: {self.config.decode.progress_style}")
 
     async def on_unload(self) -> None:
         if self._http_session and not self._http_session.closed:
@@ -374,19 +350,24 @@ class NCMaiPlugin(MaiBotPlugin):
         return os.path.join(self._get_plugin_dir(), self.TEST_NCM_FILE)
 
     def _clean_cache(self):
-        """删除缓存目录下所有文件"""
+        """删除缓存目录下的解码文件，但保留测试用的 .ncm 文件"""
+        test_file_name = os.path.basename(self.TEST_NCM_FILE)
         if os.path.isdir(self._cache_dir):
             for f in os.listdir(self._cache_dir):
+                if f == test_file_name:
+                    continue
                 fpath = os.path.join(self._cache_dir, f)
                 try:
                     if os.path.isfile(fpath):
                         os.remove(fpath)
-                except Exception:
-                    pass
+                        self.ctx.logger.info(f"[麦麦解析] 已清理缓存文件: {f}")
+                except Exception as e:
+                    self.ctx.logger.warning(f"[麦麦解析] 清理文件失败: {f}, {e}")
 
     def _get_random_progress_msg(self) -> str:
-        style = self.config.decode.progress_style
-        msgs = self.PROGRESS_STYLES.get(style, self.PROGRESS_STYLES["daily"])
+        msgs = self.config.decode.progress_messages
+        if not msgs:
+            return "🎵 解码中…"
         return random.choice(msgs)
 
     def _detect_extension(self, data: bytes) -> str:
@@ -399,6 +380,37 @@ class NCMaiPlugin(MaiBotPlugin):
         if len(data) >= 8 and data[4:8] == b'ftyp':
             return 'm4a'
         return 'bin'
+
+    def _get_user_id(self, message: dict) -> str:
+        """
+        从消息对象中提取发送者的平台用户 ID（QQ号等）。
+        兼容多种消息结构，参考 Nightmare 插件实现。
+        """
+        message_info = message.get("message_info", {})
+        if isinstance(message_info, dict):
+            user_info = message_info.get("user_info", {})
+            if isinstance(user_info, dict):
+                uid = user_info.get("user_id", "")
+                if uid: return str(uid)
+        user_info = message.get("user_info", {})
+        if isinstance(user_info, dict):
+            uid = user_info.get("user_id", "")
+            if uid: return str(uid)
+        sender = message.get("sender", {})
+        if isinstance(sender, dict):
+            uid = sender.get("user_id", "")
+            if uid: return str(uid)
+        uid = message.get("user_id", "")
+        if uid: return str(uid)
+        raw = message.get("raw_message", {})
+        if isinstance(raw, dict):
+            sender = raw.get("sender", {})
+            if isinstance(sender, dict):
+                uid = sender.get("user_id", "")
+                if uid: return str(uid)
+            uid = raw.get("user_id", "")
+            if uid: return str(uid)
+        return ""
 
     async def _send_text(self, stream_id: str, text: str):
         if stream_id:
@@ -441,7 +453,7 @@ class NCMaiPlugin(MaiBotPlugin):
             self.ctx.logger.info(f"[麦麦解析] 私聊文件上传成功: file_id={file_id}")
             ok = await self._file_sender.send_private_file(stream_id, user_id, file_id)
 
-        # 无论成功或失败，都清理本次生成的临时文件（并顺便清理整个缓存目录）
+        # 无论成功或失败，都清理本次生成的临时文件（保留测试 ncm 文件）
         self._clean_cache()
         return ok
 
@@ -478,13 +490,8 @@ class NCMaiPlugin(MaiBotPlugin):
             return None
 
         # 提取用户和群信息
-        user_id = None
+        user_id = self._get_user_id(message)
         group_id = None
-        sender = message.get("sender", {})
-        user_id = sender.get("user_id")
-        if not user_id:
-            user_info = message.get("user_info", {})
-            user_id = user_info.get("user_id")
         group_info = message.get("group_info", {}) or message.get("message_info", {}).get("group_info", {})
         group_id = group_info.get("group_id")
 
@@ -566,13 +573,11 @@ class NCMaiPlugin(MaiBotPlugin):
             await self._send_text(stream_id, "❌ /ncm 测试命令未启用")
             return True, "命令未启用", 0
 
-        # 获取发送者信息
+        # 获取消息对象
         message = kwargs.get("message", {})
-        sender = message.get("sender", {})
-        sender_id = str(sender.get("user_id", ""))
-        if not sender_id:
-            user_info = message.get("user_info", {})
-            sender_id = str(user_info.get("user_id", ""))
+
+        # 使用增强的 ID 提取方法获取发送者 QQ 号
+        sender_id = self._get_user_id(message)
 
         # 测试账号限制
         if config.test_user_id and sender_id != config.test_user_id:
@@ -608,7 +613,7 @@ class NCMaiPlugin(MaiBotPlugin):
             f.write(audio_data)
 
         # 发送给当前用户（私聊或群聊），使用当前消息的 stream_id
-        user_id = int(sender_id)
+        user_id = int(sender_id) if sender_id else 0
         group_id = None
         group_info = message.get("group_info", {}) or message.get("message_info", {}).get("group_info", {})
         if group_info:
@@ -632,4 +637,4 @@ class NCMaiPlugin(MaiBotPlugin):
 def create_plugin():
     return NCMaiPlugin()
 
-# try6
+# try7
