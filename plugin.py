@@ -1,5 +1,7 @@
 """
 麦麦解析 (NCMai) - 解码用户发送的 .ncm 文件并返回原始音频。
+
+⚠️ 免责声明：本插件仅供技术学习交流，请于 24 小时内删除解码生成的文件。
 感谢 termux 提供的源代码。
 
 2026-06-22 Try1: 初始版本，将 C 解码核心迁移为纯 Python 实现。
@@ -7,7 +9,8 @@
 2026-06-24 Try3: 完善文件发送流程（先上传获取 file_id 再发送），支持 SnowLuma / NapCat 双适配器。
 2026-06-24 Try4: 新增 /ncm 命令（单文件测试解码），新增 test 配置节，完善免责声明。提示语日常化。
 2026-06-25 Try5: 全面重构 WebUI 配置（下拉选择器），强化日志，测试命令可控，缓存自动清理。
-2026-06-26 Try6: 网关改为滑动开关（SnowLuma/NapCat），提示语恢复为可编辑列表；增强用户 ID 提取兼容性；Docker 环境适配。
+2026-06-26 Try6: 网关改为滑动开关（SnowLuma/NapCat），提示语恢复为可编辑列表；增强用户 ID 提取兼容性。
+2026-06-26 Try7: Docker 方案 A，移除 base64 降级，专注 upload_group_file 正确调用。
 """
 import asyncio
 import os
@@ -25,8 +28,6 @@ from maibot_sdk import (
 from maibot_sdk.types import HookMode, HookOrder
 
 import aiohttp
-
-# AES 解密库导入（兼容多种安装方式）
 from Crypto.Cipher import AES
 
 # ============================================================================
@@ -209,10 +210,10 @@ class NCMDecoder:
         return bytes(audio)
 
 # ============================================================================
-# 文件发送适配器（Docker 共享目录版 - 方案 A）
+# 文件发送适配器（纯 upload_group_file / upload_private_file 方式）
 # ============================================================================
 class FileSender:
-    """统一文件发送接口，支持 SnowLuma 和 NapCat 两种适配器"""
+    """统一文件发送接口，通过 OneBot 标准上传 API 获取 file_id 后发送。"""
 
     def __init__(self, plugin: 'NCMaiPlugin'):
         self.plugin = plugin
@@ -222,16 +223,12 @@ class FileSender:
         return "snowluma" if self.plugin.config.gateway.use_snowluma else "napcat"
 
     async def upload_group_file(self, group_id: int, file_path: str, name: str) -> Optional[str]:
-        """
-        上传群文件，返回 file_id。
-        方案 A：SnowLuma 容器映射了 ./data/MaiMBot/plugins/NcMai/test_ncm_song
-               到 /MaiMBot/plugins/NcMai/test_ncm_song，
-               core 容器内文件也在这个路径，所以直接用 file:/// 路径即可。
-        """
+        """上传群文件，返回 file_id。使用绝对路径直接传递（SnowLuma 要求本地路径）。"""
         abs_path = os.path.abspath(file_path).replace(os.sep, '/')
-        self.plugin.ctx.logger.info(f"[麦麦解析] 开始上传群文件: {name} (group_id={group_id}, path={abs_path})")
+        self.plugin.ctx.logger.info(
+            f"[麦麦解析] 开始上传群文件: {name} (group_id={group_id}, path={abs_path})"
+        )
 
-        # 检查文件是否存在且可读
         if not os.path.isfile(abs_path):
             self.plugin.ctx.logger.error(f"[麦麦解析] 文件不存在: {abs_path}")
             return None
@@ -240,15 +237,16 @@ class FileSender:
             return None
 
         file_size = os.path.getsize(abs_path)
-        self.plugin.ctx.logger.info(f"[麦麦解析] 文件大小: {file_size} bytes，准备调用 upload_group_file API")
+        self.plugin.ctx.logger.info(f"[麦麦解析] 文件大小: {file_size} bytes")
 
+        # 根据 SnowLuma 源码，file 参数应为本地文件路径（不支持 file:// 协议）
         try:
             result = await self.plugin.ctx.send.custom(
                 custom_type="upload_group_file",
                 stream_id="",
                 data={
                     "group_id": group_id,
-                    "file": f"file://{abs_path}",
+                    "file": abs_path,               # 容器内绝对路径
                     "name": name,
                     "folder": "/",
                 },
@@ -261,17 +259,18 @@ class FileSender:
                     self.plugin.ctx.logger.info(f"[麦麦解析] 群文件上传成功: file_id={file_id}")
                     return file_id
 
-            # 返回 False 或其他异常值时，尝试 base64 降级
-            self.plugin.ctx.logger.warning(f"[麦麦解析] upload_group_file 返回异常，降级为 base64 发送")
+            self.plugin.ctx.logger.error(f"[麦麦解析] upload_group_file 未返回有效的 file_id")
             return None
         except Exception as e:
-            self.plugin.ctx.logger.error(f"[麦麦解析] 上传群文件异常: {e}，降级为 base64 发送")
+            self.plugin.ctx.logger.error(f"[麦麦解析] 上传群文件异常: {e}")
             return None
 
     async def upload_private_file(self, user_id: int, file_path: str, name: str) -> Optional[str]:
-        """上传私聊文件，返回 file_id"""
+        """上传私聊文件，返回 file_id。"""
         abs_path = os.path.abspath(file_path).replace(os.sep, '/')
-        self.plugin.ctx.logger.info(f"[麦麦解析] 开始上传私聊文件: {name} (user_id={user_id}, path={abs_path})")
+        self.plugin.ctx.logger.info(
+            f"[麦麦解析] 开始上传私聊文件: {name} (user_id={user_id}, path={abs_path})"
+        )
 
         if not os.path.isfile(abs_path):
             self.plugin.ctx.logger.error(f"[麦麦解析] 文件不存在: {abs_path}")
@@ -286,7 +285,7 @@ class FileSender:
                 stream_id="",
                 data={
                     "user_id": user_id,
-                    "file": f"file://{abs_path}",
+                    "file": abs_path,               # 容器内绝对路径
                     "name": name,
                 },
             )
@@ -298,50 +297,14 @@ class FileSender:
                     self.plugin.ctx.logger.info(f"[麦麦解析] 私聊文件上传成功: file_id={file_id}")
                     return file_id
 
-            self.plugin.ctx.logger.warning(f"[麦麦解析] upload_private_file 返回异常，降级为 base64 发送")
+            self.plugin.ctx.logger.error(f"[麦麦解析] upload_private_file 未返回有效的 file_id")
             return None
         except Exception as e:
-            self.plugin.ctx.logger.error(f"[麦麦解析] 上传私聊文件异常: {e}，降级为 base64 发送")
+            self.plugin.ctx.logger.error(f"[麦麦解析] 上传私聊文件异常: {e}")
             return None
-
-    async def _send_file_base64(self, stream_id: str, file_path: str, file_name: str,
-                                user_id: int, group_id: Optional[int] = None) -> bool:
-        """降级方案：使用 base64 直接发送文件（不经过上传步骤）"""
-        import base64
-        try:
-            with open(file_path, "rb") as f:
-                file_data = base64.b64encode(f.read()).decode("ascii")
-
-            if group_id:
-                custom_type = "send_group_msg"
-                data = {
-                    "group_id": group_id,
-                    "message": [
-                        {"type": "file", "data": {"file": f"base64://{file_data}", "name": file_name}}
-                    ],
-                }
-            else:
-                custom_type = "send_private_msg"
-                data = {
-                    "user_id": user_id,
-                    "message": [
-                        {"type": "file", "data": {"file": f"base64://{file_data}", "name": file_name}}
-                    ],
-                }
-
-            result = await self.plugin.ctx.send.custom(
-                custom_type=custom_type,
-                stream_id=stream_id,
-                data=data,
-            )
-            self.plugin.ctx.logger.info(f"[麦麦解析] base64 发送结果: {result}")
-            return True
-        except Exception as e:
-            self.plugin.ctx.logger.error(f"[麦麦解析] base64 发送失败: {e}")
-            return False
 
     async def send_group_file(self, stream_id: str, group_id: int, file_id: str) -> bool:
-        """发送群文件消息"""
+        """发送群文件消息（需要已上传的 file_id）"""
         self.plugin.ctx.logger.info(f"[麦麦解析] 发送群文件消息: file_id={file_id}, group_id={group_id}")
         try:
             result = await self.plugin.ctx.send.custom(
@@ -361,7 +324,7 @@ class FileSender:
             return False
 
     async def send_private_file(self, stream_id: str, user_id: int, file_id: str) -> bool:
-        """发送私聊文件消息"""
+        """发送私聊文件消息（需要已上传的 file_id）"""
         self.plugin.ctx.logger.info(f"[麦麦解析] 发送私聊文件消息: file_id={file_id}, user_id={user_id}")
         try:
             result = await self.plugin.ctx.send.custom(
@@ -452,10 +415,7 @@ class NCMaiPlugin(MaiBotPlugin):
         return 'bin'
 
     def _get_user_id(self, message: dict) -> str:
-        """
-        从消息对象中提取发送者的平台用户 ID（QQ号等）。
-        兼容多种消息结构，参考 Nightmare 插件实现。
-        """
+        """从消息对象中提取发送者的平台用户 ID（QQ号等）。"""
         message_info = message.get("message_info", {})
         if isinstance(message_info, dict):
             user_info = message_info.get("user_info", {})
@@ -499,35 +459,30 @@ class NCMaiPlugin(MaiBotPlugin):
             self.ctx.logger.warning(f"[麦麦解析] 解码失败: {source_name}")
         return audio_data
 
-async def _send_decoded_file(
-    self,
-    stream_id: str,
-    file_path: str,
-    file_name: str,
-    user_id: int,
-    group_id: Optional[int] = None,
-) -> bool:
-    self.ctx.logger.info(f"[麦麦解析] 准备发送文件: {file_name}, 目标: user_id={user_id}, group_id={group_id}")
-    
-    if group_id:
-        file_id = await self._file_sender.upload_group_file(group_id, file_path, file_name)
-        if file_id:
-            self.ctx.logger.info(f"[麦麦解析] 群文件上传成功: file_id={file_id}")
+    async def _send_decoded_file(
+        self,
+        stream_id: str,
+        file_path: str,
+        file_name: str,
+        user_id: int,
+        group_id: Optional[int] = None,
+    ) -> bool:
+        """上传并发送解码后的文件。上传失败则返回 False。"""
+        self.ctx.logger.info(
+            f"[麦麦解析] 准备发送文件: {file_name}, 目标: user_id={user_id}, group_id={group_id}"
+        )
+        if group_id:
+            file_id = await self._file_sender.upload_group_file(group_id, file_path, file_name)
+            if not file_id:
+                self.ctx.logger.error("[麦麦解析] 群文件上传失败，无法发送")
+                return False
             return await self._file_sender.send_group_file(stream_id, group_id, file_id)
         else:
-            # 上传失败，降级为 base64 直接发送
-            self.ctx.logger.warning("[麦麦解析] 群文件上传失败，降级为 base64 发送")
-            return await self._file_sender._send_file_base64(stream_id, file_path, file_name, user_id, group_id)
-    else:
-        file_id = await self._file_sender.upload_private_file(user_id, file_path, file_name)
-        if file_id:
-            self.ctx.logger.info(f"[麦麦解析] 私聊文件上传成功: file_id={file_id}")
+            file_id = await self._file_sender.upload_private_file(user_id, file_path, file_name)
+            if not file_id:
+                self.ctx.logger.error("[麦麦解析] 私聊文件上传失败，无法发送")
+                return False
             return await self._file_sender.send_private_file(stream_id, user_id, file_id)
-        else:
-            self.ctx.logger.warning("[麦麦解析] 私聊文件上传失败，降级为 base64 发送")
-            return await self._file_sender._send_file_base64(stream_id, file_path, file_name, user_id, None)
-
-    return False
 
     # ===== Hook：拦截文件消息 =====
     @HookHandler(
@@ -561,7 +516,6 @@ async def _send_decoded_file(
             self.ctx.logger.info(f"[麦麦解析] 非 .ncm 文件，忽略: {file_name}")
             return None
 
-        # 提取用户和群信息
         user_id = self._get_user_id(message)
         group_id = None
         group_info = message.get("group_info", {}) or message.get("message_info", {}).get("group_info", {})
@@ -590,11 +544,9 @@ async def _send_decoded_file(
             await self._send_text(stream_id, "❌ 无法获取文件下载链接")
             return {"action": "abort"}
 
-        # 发送随机提示语
         progress_msg = self._get_random_progress_msg()
         await self._send_text(stream_id, progress_msg)
 
-        # 下载文件
         if self._http_session is None or self._http_session.closed:
             self._http_session = aiohttp.ClientSession()
         try:
@@ -610,7 +562,6 @@ async def _send_decoded_file(
             await self._send_text(stream_id, "❌ 文件下载出错")
             return {"action": "abort"}
 
-        # 解码
         audio_data = await self._do_decode(ncm_data, file_name)
         if not audio_data:
             await self._send_text(stream_id, "❌ 解码失败，文件可能已损坏或不是标准 .ncm 格式")
@@ -645,13 +596,9 @@ async def _send_decoded_file(
             await self._send_text(stream_id, "❌ /ncm 测试命令未启用")
             return True, "命令未启用", 0
 
-        # 获取消息对象
         message = kwargs.get("message", {})
-
-        # 使用增强的 ID 提取方法获取发送者 QQ 号
         sender_id = self._get_user_id(message)
 
-        # 测试账号限制
         if config.test_user_id and sender_id != config.test_user_id:
             self.ctx.logger.info(f"[麦麦解析] /ncm 命令被非测试用户触发: {sender_id}")
             await self._send_text(stream_id, "❌ 你没有权限使用此命令")
@@ -663,7 +610,6 @@ async def _send_decoded_file(
             await self._send_text(stream_id, "❌ 测试文件不存在，请联系管理员")
             return True, "测试文件不存在", 0
 
-        # 读取并解码
         try:
             with open(test_file_path, "rb") as f:
                 ncm_data = f.read()
@@ -684,7 +630,6 @@ async def _send_decoded_file(
         with open(out_path, "wb") as f:
             f.write(audio_data)
 
-        # 发送给当前用户（私聊或群聊），使用当前消息的 stream_id
         user_id = int(sender_id) if sender_id else 0
         group_id = None
         group_info = message.get("group_info", {}) or message.get("message_info", {}).get("group_info", {})
