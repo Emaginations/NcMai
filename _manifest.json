@@ -1,9 +1,9 @@
 {
   "manifest_version": 2,
   "id": "1m.ncmai",
-  "version": "0.0.5",
+  "version": "0.0.7",
   "name": "麦麦解析",
-  "description": "解码 QQ 用户发送的 .ncm 文件，并返回原始音频。仅供技术学习，请于 24 小时内删除生成文件。",
+  "description": "解码 QQ 用户发送的 .ncm 文件，并返回原始音频。",
   "author": {
     "name": "Emaginations",
     "url": "https://github.com/Emaginations"

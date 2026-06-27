@@ -209,7 +209,7 @@ class NCMDecoder:
         return bytes(audio)
 
 # ============================================================================
-# 文件发送适配器
+# 文件发送适配器（Docker 共享目录版 - 方案 A）
 # ============================================================================
 class FileSender:
     """统一文件发送接口，支持 SnowLuma 和 NapCat 两种适配器"""
@@ -222,55 +222,126 @@ class FileSender:
         return "snowluma" if self.plugin.config.gateway.use_snowluma else "napcat"
 
     async def upload_group_file(self, group_id: int, file_path: str, name: str) -> Optional[str]:
+        """
+        上传群文件，返回 file_id。
+        方案 A：SnowLuma 容器映射了 ./data/MaiMBot/plugins/NcMai/test_ncm_song
+               到 /MaiMBot/plugins/NcMai/test_ncm_song，
+               core 容器内文件也在这个路径，所以直接用 file:/// 路径即可。
+        """
         abs_path = os.path.abspath(file_path).replace(os.sep, '/')
         self.plugin.ctx.logger.info(f"[麦麦解析] 开始上传群文件: {name} (group_id={group_id}, path={abs_path})")
+
+        # 检查文件是否存在且可读
+        if not os.path.isfile(abs_path):
+            self.plugin.ctx.logger.error(f"[麦麦解析] 文件不存在: {abs_path}")
+            return None
+        if not os.access(abs_path, os.R_OK):
+            self.plugin.ctx.logger.error(f"[麦麦解析] 文件不可读: {abs_path}")
+            return None
+
+        file_size = os.path.getsize(abs_path)
+        self.plugin.ctx.logger.info(f"[麦麦解析] 文件大小: {file_size} bytes，准备调用 upload_group_file API")
+
         try:
             result = await self.plugin.ctx.send.custom(
                 custom_type="upload_group_file",
                 stream_id="",
                 data={
                     "group_id": group_id,
-                    "file": f"file:///{abs_path}",
+                    "file": f"file://{abs_path}",
                     "name": name,
                     "folder": "/",
                 },
             )
-            self.plugin.ctx.logger.info(f"[麦麦解析] upload_group_file 返回: {result}")
+            self.plugin.ctx.logger.info(f"[麦麦解析] upload_group_file 返回: {result} (type: {type(result)})")
+
             if isinstance(result, dict):
                 file_id = result.get("file_id") or result.get("data", {}).get("file_id")
                 if file_id:
                     self.plugin.ctx.logger.info(f"[麦麦解析] 群文件上传成功: file_id={file_id}")
                     return file_id
+
+            # 返回 False 或其他异常值时，尝试 base64 降级
+            self.plugin.ctx.logger.warning(f"[麦麦解析] upload_group_file 返回异常，降级为 base64 发送")
             return None
         except Exception as e:
-            self.plugin.ctx.logger.error(f"[麦麦解析] 上传群文件异常: {e}")
+            self.plugin.ctx.logger.error(f"[麦麦解析] 上传群文件异常: {e}，降级为 base64 发送")
             return None
 
     async def upload_private_file(self, user_id: int, file_path: str, name: str) -> Optional[str]:
+        """上传私聊文件，返回 file_id"""
         abs_path = os.path.abspath(file_path).replace(os.sep, '/')
         self.plugin.ctx.logger.info(f"[麦麦解析] 开始上传私聊文件: {name} (user_id={user_id}, path={abs_path})")
+
+        if not os.path.isfile(abs_path):
+            self.plugin.ctx.logger.error(f"[麦麦解析] 文件不存在: {abs_path}")
+            return None
+        if not os.access(abs_path, os.R_OK):
+            self.plugin.ctx.logger.error(f"[麦麦解析] 文件不可读: {abs_path}")
+            return None
+
         try:
             result = await self.plugin.ctx.send.custom(
                 custom_type="upload_private_file",
                 stream_id="",
                 data={
                     "user_id": user_id,
-                    "file": f"file:///{abs_path}",
+                    "file": f"file://{abs_path}",
                     "name": name,
                 },
             )
-            self.plugin.ctx.logger.info(f"[麦麦解析] upload_private_file 返回: {result}")
+            self.plugin.ctx.logger.info(f"[麦麦解析] upload_private_file 返回: {result} (type: {type(result)})")
+
             if isinstance(result, dict):
                 file_id = result.get("file_id") or result.get("data", {}).get("file_id")
                 if file_id:
                     self.plugin.ctx.logger.info(f"[麦麦解析] 私聊文件上传成功: file_id={file_id}")
                     return file_id
+
+            self.plugin.ctx.logger.warning(f"[麦麦解析] upload_private_file 返回异常，降级为 base64 发送")
             return None
         except Exception as e:
-            self.plugin.ctx.logger.error(f"[麦麦解析] 上传私聊文件异常: {e}")
+            self.plugin.ctx.logger.error(f"[麦麦解析] 上传私聊文件异常: {e}，降级为 base64 发送")
             return None
 
+    async def _send_file_base64(self, stream_id: str, file_path: str, file_name: str,
+                                user_id: int, group_id: Optional[int] = None) -> bool:
+        """降级方案：使用 base64 直接发送文件（不经过上传步骤）"""
+        import base64
+        try:
+            with open(file_path, "rb") as f:
+                file_data = base64.b64encode(f.read()).decode("ascii")
+
+            if group_id:
+                custom_type = "send_group_msg"
+                data = {
+                    "group_id": group_id,
+                    "message": [
+                        {"type": "file", "data": {"file": f"base64://{file_data}", "name": file_name}}
+                    ],
+                }
+            else:
+                custom_type = "send_private_msg"
+                data = {
+                    "user_id": user_id,
+                    "message": [
+                        {"type": "file", "data": {"file": f"base64://{file_data}", "name": file_name}}
+                    ],
+                }
+
+            result = await self.plugin.ctx.send.custom(
+                custom_type=custom_type,
+                stream_id=stream_id,
+                data=data,
+            )
+            self.plugin.ctx.logger.info(f"[麦麦解析] base64 发送结果: {result}")
+            return True
+        except Exception as e:
+            self.plugin.ctx.logger.error(f"[麦麦解析] base64 发送失败: {e}")
+            return False
+
     async def send_group_file(self, stream_id: str, group_id: int, file_id: str) -> bool:
+        """发送群文件消息"""
         self.plugin.ctx.logger.info(f"[麦麦解析] 发送群文件消息: file_id={file_id}, group_id={group_id}")
         try:
             result = await self.plugin.ctx.send.custom(
@@ -290,6 +361,7 @@ class FileSender:
             return False
 
     async def send_private_file(self, stream_id: str, user_id: int, file_id: str) -> bool:
+        """发送私聊文件消息"""
         self.plugin.ctx.logger.info(f"[麦麦解析] 发送私聊文件消息: file_id={file_id}, user_id={user_id}")
         try:
             result = await self.plugin.ctx.send.custom(
@@ -427,33 +499,35 @@ class NCMaiPlugin(MaiBotPlugin):
             self.ctx.logger.warning(f"[麦麦解析] 解码失败: {source_name}")
         return audio_data
 
-    async def _send_decoded_file(
-        self,
-        stream_id: str,
-        file_path: str,
-        file_name: str,
-        user_id: int,
-        group_id: Optional[int] = None,
-    ) -> bool:
-        self.ctx.logger.info(f"[麦麦解析] 准备发送文件: {file_name}, 目标: user_id={user_id}, group_id={group_id}")
-        if group_id:
-            file_id = await self._file_sender.upload_group_file(group_id, file_path, file_name)
-            if not file_id:
-                self.ctx.logger.error("[麦麦解析] 群文件上传失败，未获取到 file_id")
-                return False
+async def _send_decoded_file(
+    self,
+    stream_id: str,
+    file_path: str,
+    file_name: str,
+    user_id: int,
+    group_id: Optional[int] = None,
+) -> bool:
+    self.ctx.logger.info(f"[麦麦解析] 准备发送文件: {file_name}, 目标: user_id={user_id}, group_id={group_id}")
+    
+    if group_id:
+        file_id = await self._file_sender.upload_group_file(group_id, file_path, file_name)
+        if file_id:
             self.ctx.logger.info(f"[麦麦解析] 群文件上传成功: file_id={file_id}")
-            ok = await self._file_sender.send_group_file(stream_id, group_id, file_id)
+            return await self._file_sender.send_group_file(stream_id, group_id, file_id)
         else:
-            file_id = await self._file_sender.upload_private_file(user_id, file_path, file_name)
-            if not file_id:
-                self.ctx.logger.error("[麦麦解析] 私聊文件上传失败，未获取到 file_id")
-                return False
+            # 上传失败，降级为 base64 直接发送
+            self.ctx.logger.warning("[麦麦解析] 群文件上传失败，降级为 base64 发送")
+            return await self._file_sender._send_file_base64(stream_id, file_path, file_name, user_id, group_id)
+    else:
+        file_id = await self._file_sender.upload_private_file(user_id, file_path, file_name)
+        if file_id:
             self.ctx.logger.info(f"[麦麦解析] 私聊文件上传成功: file_id={file_id}")
-            ok = await self._file_sender.send_private_file(stream_id, user_id, file_id)
+            return await self._file_sender.send_private_file(stream_id, user_id, file_id)
+        else:
+            self.ctx.logger.warning("[麦麦解析] 私聊文件上传失败，降级为 base64 发送")
+            return await self._file_sender._send_file_base64(stream_id, file_path, file_name, user_id, None)
 
-        # 无论成功或失败，都清理本次生成的临时文件（保留测试 ncm 文件）
-        self._clean_cache()
-        return ok
+    return False
 
     # ===== Hook：拦截文件消息 =====
     @HookHandler(
