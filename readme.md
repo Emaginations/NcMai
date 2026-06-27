@@ -27,7 +27,8 @@
 
 ## 配置
 
-有人性化的webui设计，请在webui插件市场安装并在管理页面进行配置:
+有人性化的webui设计，请在webui插件市场安装并在管理页面进行配置，完成后请重启maibot以安装所需python依赖。
+如果你使用docker，请使用或参考[docker-compose(NcMai)](https://github.com/Emaginations/maibot-snowluma_docker-compose/blob/main/docker-compose(NcMai).yaml)进行文件夹暴露，以使snowluma或napcat能够访问到test_ncm_song文件夹。
 
 <br>
 
